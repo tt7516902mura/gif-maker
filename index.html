@@ -21,6 +21,15 @@ input:not([type=checkbox]),select{width:100%;padding:10px;border:1px solid var(-
 .go:disabled{opacity:.5}
 .out img{max-width:100%;border:1px solid var(--line)}
 .err{color:#c0392b}
+.busy{display:none;align-items:center;gap:14px;margin-top:14px}.busy.on{display:flex}
+.frames{display:flex;gap:4px}
+.frames i{width:14px;height:20px;border:2px solid var(--ac);border-radius:2px;animation:fr 1s infinite}
+.frames i:nth-child(2){animation-delay:.2s}.frames i:nth-child(3){animation-delay:.4s}.frames i:nth-child(4){animation-delay:.6s}.frames i:nth-child(5){animation-delay:.8s}
+@keyframes fr{0%,19%{background:var(--ac)}20%,100%{background:transparent}}
+@media(prefers-reduced-motion:reduce){.frames i{animation:none}}
+.bar{display:none;height:8px;margin-top:10px;background:var(--line);border-radius:4px;overflow:hidden}.busy.on+.bar{display:block}
+.bar b{display:block;height:100%;width:0;background:var(--ac);transition:width .3s}
+.cx{padding:8px 16px;background:none;border:1px solid var(--line);border-radius:6px;color:inherit;font:inherit;cursor:pointer}
 button:focus-visible,input:focus-visible,select:focus-visible{outline:3px solid var(--ac);outline-offset:2px}
 </style>
 <main><h1>GIFメーカー</h1><div class=tabs></div></main>
@@ -39,7 +48,7 @@ s.innerHTML=`<label>${c.name}ファイル${c.multi?"(複数可、選んだ順)":
 <div class=row><div><label>幅(px)</label><input data-p=width type=number min=16 max=1920 value=${c.w}></div><div class=h hidden><label>高さ(px)</label><input data-p=height type=number min=16 max=1920 value=${c.w}></div></div>
 <label>形に合わない部分</label><select data-p=fit_mode><option value=contain>全体を収める(余白は白)<option value=crop>切り抜いて埋める</select>
 <label><input type=checkbox data-p=loop checked> くり返し再生</label>
-<button class=go>GIFにする</button><p class=st></p><div class=out></div>`;
+<button class=go>GIFにする</button><div class=busy><span class=frames><i></i><i></i><i></i><i></i><i></i></span><button type=button class=cx>キャンセル</button></div><div class=bar><b></b></div><p class=st></p><div class=out></div>`;
 s.onclick=e=>{const t=e.target.closest(".shapes button");if(!t)return;
 s.querySelectorAll(".shapes button").forEach(x=>x.classList.toggle("on",x==t));
 s.querySelector("[data-p=preset]").value=t.dataset.v;s.querySelector(".h").hidden=t.dataset.v!="custom"};
@@ -47,16 +56,23 @@ s.querySelector(".go").onclick=()=>go(k,s);main.append(s)}
 function show(k){document.querySelectorAll("[data-k]").forEach(e=>e.classList.toggle("on",e.dataset.k==k))}
 show("video");
 function go(k,s){
-const f=s.querySelector("[name=files]").files,st=s.querySelector(".st"),out=s.querySelector(".out"),btn=s.querySelector(".go");
+const f=s.querySelector("[name=files]").files,st=s.querySelector(".st"),out=s.querySelector(".out"),btn=s.querySelector(".go"),busy=s.querySelector(".busy");
 if(!f.length){st.className="st err";st.textContent="ファイルを選んでください";return}
-const fd=new FormData();fd.append("kind",k);[...f].forEach(x=>fd.append("files",x));
+const job=crypto.randomUUID?crypto.randomUUID():String(Math.random()).slice(2);
+const fd=new FormData();fd.append("kind",k);fd.append("job",job);[...f].forEach(x=>fd.append("files",x));
 s.querySelectorAll("[data-p]").forEach(e=>fd.append(e.dataset.p,e.type=="checkbox"?+e.checked:e.value));
 const x=new XMLHttpRequest();x.open("POST","/api/convert");x.responseType="blob";
-btn.disabled=true;st.className="st";out.innerHTML="";
-x.upload.onprogress=e=>st.textContent=`アップロード中 ${Math.round(e.loaded/e.total*100)}%`;
-x.upload.onload=()=>st.textContent="変換中…(長い動画は数分かかります)";
-x.onerror=()=>{btn.disabled=false;st.className="st err";st.textContent="通信に失敗しました"};
-x.onload=async()=>{btn.disabled=false;
+const t0=Date.now();let msg="アップロード中";
+const upd=()=>st.textContent=`${msg}(${Math.round((Date.now()-t0)/1000)}秒)`;
+let poll;const bar=s.querySelector(".bar b");const tm=setInterval(upd,1000);
+const end=()=>{clearInterval(tm);clearInterval(poll);busy.classList.remove("on");btn.disabled=false};
+btn.disabled=true;st.className="st";out.innerHTML="";bar.style.width="0";busy.classList.add("on");upd();
+s.querySelector(".cx").onclick=()=>{x.abort();fetch("/api/cancel",{method:"POST",body:new URLSearchParams({job})})};
+x.upload.onprogress=e=>{const p=Math.round(e.loaded/e.total*100);msg=`アップロード中 ${p}%`;bar.style.width=p+"%";upd()};
+x.upload.onload=()=>{msg="変換中 0%";bar.style.width="0";upd();poll=setInterval(async()=>{try{const r=await(await fetch("/api/progress?job="+job)).json();msg=`${r.stage} ${r.pct}%`;bar.style.width=r.pct+"%";upd()}catch{}},700)};
+x.onabort=()=>{end();st.textContent="キャンセルしました"};
+x.onerror=()=>{end();st.className="st err";st.textContent="通信に失敗しました"};
+x.onload=async()=>{end();
 if(x.status==200){const u=URL.createObjectURL(x.response);
 st.textContent=`完了: ${x.getResponseHeader("X-Size")} px / ${(x.response.size/1048576).toFixed(1)} MB`;
 out.innerHTML=`<img src="${u}"><p><a href="${u}" download="output.gif">GIFを保存</a></p>`}

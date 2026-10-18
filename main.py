@@ -11,6 +11,8 @@ MAX_MB = int(os.getenv("MAX_UPLOAD_MB", "150"))
 MAX_SIDE = 1920
 ASPECT = {"rect": (16, 9), "square": (1, 1), "tall": (9, 16), "classic": (4, 3)}
 LOCK = threading.Lock()
+CUR = {"id": None, "proc": None, "pct": 0, "stage": ""}
+CANCELED = set()
 app = FastAPI()
 
 
@@ -40,14 +42,65 @@ def index():
     return (Path(__file__).parent / "index.html").read_text("utf-8")
 
 
-def run(cmd):
+def run(cmd, base=0, span=0, total=0, stage=""):
+    if CUR["id"] in CANCELED:
+        raise HTTPException(499, "キャンセルしました")
+    if stage:
+        CUR["stage"] = stage
+    err = tempfile.TemporaryFile()
+    p = subprocess.Popen(["ffmpeg", "-nostdin", "-y", "-v", "error", "-progress", "pipe:1", *cmd],
+                         stdout=subprocess.PIPE, stderr=err, text=True)
+    CUR["proc"] = p
+    late = []
+    timer = threading.Timer(600, lambda: (late.append(1), p.kill()))
+    timer.start()
     try:
-        p = subprocess.run(["ffmpeg", "-nostdin", "-y", "-v", "error", *cmd],
-                           capture_output=True, text=True, timeout=600)
-    except subprocess.TimeoutExpired:
+        for line in p.stdout:
+            if total and line.startswith("out_time_us="):
+                try:
+                    t = int(line.split("=")[1]) / 1e6
+                except ValueError:
+                    continue
+                CUR["pct"] = base + span * min(max(t / total, 0), 1)
+        p.wait()
+    finally:
+        timer.cancel()
+        CUR["proc"] = None
+    if CUR["id"] in CANCELED:
+        raise HTTPException(499, "キャンセルしました")
+    if late:
         raise HTTPException(504, "時間がかかりすぎました。長さや大きさを小さくしてください")
     if p.returncode:
-        raise HTTPException(500, "ffmpegエラー: " + p.stderr[-400:])
+        err.seek(0)
+        raise HTTPException(500, "ffmpegエラー: " + err.read().decode("utf-8", "ignore")[-400:])
+    CUR["pct"] = base + span
+
+
+@app.post("/api/cancel")
+def cancel(job: str = Form(...)):
+    if len(CANCELED) > 200:
+        CANCELED.clear()
+    CANCELED.add(job)
+    p = CUR["proc"]
+    if p and CUR["id"] == job:
+        p.kill()
+    return Response("ok")
+
+
+@app.get("/api/progress")
+def progress(job: str):
+    if CUR["id"] == job:
+        return {"pct": round(CUR["pct"]), "stage": CUR["stage"]}
+    return {"pct": 0, "stage": "順番待ち"}
+
+
+def probe(p):
+    try:
+        r = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration",
+                            "-of", "csv=p=0", str(p)], capture_output=True, text=True, timeout=30)
+        return float(r.stdout.strip())
+    except Exception:
+        return 0.0
 
 
 def size(preset, w, h, src):
@@ -101,12 +154,16 @@ def page_list(s, n):
     return out[:100]
 
 
-def palette_gif(inp, vf, tmp, out, loop):
+def palette_gif(inp, vf, tmp, out, loop, total, base):
     pal = tmp / "pal.png"
-    run([*inp, "-vf", vf + ",palettegen=stats_mode=full", "-update", "1", str(pal)])
+    rest = 100 - base
+    run([*inp, "-filter_complex", f"{vf},split[a][b];[a]palettegen=stats_mode=full[p]",
+         "-map", "[p]", "-update", "1", str(pal), "-map", "[b]", "-f", "null", "-"],
+        base, rest * 0.4, total, "色を解析中")
     run([*inp, "-i", str(pal), "-lavfi",
          f"{vf}[x];[x][1:v]paletteuse=dither=sierra2_4a:diff_mode=rectangle",
-         "-loop", "0" if loop else "-1", str(out)])
+         "-loop", "0" if loop else "-1", str(out)],
+        base + rest * 0.4, rest * 0.6, total, "GIFを作成中")
 
 
 def build(kind, paths, tmp, out, preset, width, height, mode, fps, start, length, seconds, pages, loop):
@@ -115,6 +172,8 @@ def build(kind, paths, tmp, out, preset, width, height, mode, fps, start, length
         run(["-ss", str(start), "-i", str(paths[0]), "-frames:v", "1", str(first)])
         with Image.open(first) as im:
             W, H = size(preset, width, height, im.size)
+        avail = max(probe(paths[0]) - start, 0)
+        total, base = min(length or avail or 120, avail or 120, 120), 0
         inp = ["-ss", str(start), "-t", str(min(length or 120, 120)), "-i", str(paths[0])]
         vf = f"fps={min(max(fps, 1), 30)},{fit(W, H, mode)}"
     else:
@@ -135,10 +194,14 @@ def build(kind, paths, tmp, out, preset, width, height, mode, fps, start, length
                 pix = doc[idx[i]].get_pixmap(matrix=fitz.Matrix(z, z), alpha=False)
                 return place(Image.frombytes("RGB", (pix.width, pix.height), pix.samples), W, H, mode)
         for i in range(n):
+            if CUR["id"] in CANCELED:
+                raise HTTPException(499, "キャンセルしました")
+            CUR["pct"], CUR["stage"] = 80 * i / n, "画像を準備中"
             get(i).save(tmp / f"f{i:04d}.png")
         inp = ["-framerate", f"{1 / max(seconds, 0.1):.5f}", "-i", str(tmp / "f%04d.png")]
         vf = "null"
-    palette_gif(inp, vf, tmp, out, loop)
+        total, base = n * max(seconds, 0.1), 80
+    palette_gif(inp, vf, tmp, out, loop, total, base)
     return W, H
 
 
@@ -146,7 +209,8 @@ def build(kind, paths, tmp, out, preset, width, height, mode, fps, start, length
 def convert(kind: str = Form(...), files: list[UploadFile] = File(...), preset: str = Form("rect"),
             width: int = Form(720), height: int = Form(720), fit_mode: str = Form("contain"),
             fps: int = Form(12), start: float = Form(0), length: float = Form(0),
-            seconds: float = Form(2), pages: str = Form(""), loop: bool = Form(True)):
+            seconds: float = Form(2), pages: str = Form(""), loop: bool = Form(True),
+            job: str = Form("")):
     if kind not in ("video", "images", "pdf"):
         raise HTTPException(400, "種類が正しくありません")
     tmp = Path(tempfile.mkdtemp())
@@ -159,8 +223,13 @@ def convert(kind: str = Form(...), files: list[UploadFile] = File(...), preset: 
             paths.append(p)
         out = tmp / "out.gif"
         with LOCK:
-            W, H = build(kind, paths, tmp, out, preset, width, height, fit_mode, fps,
-                         max(start, 0), length, seconds, pages, loop)
+            CUR.update(id=job, pct=0, stage="準備中")
+            try:
+                W, H = build(kind, paths, tmp, out, preset, width, height, fit_mode, fps,
+                             max(start, 0), length, seconds, pages, loop)
+            finally:
+                CUR["id"] = None
+                CANCELED.discard(job)
     except HTTPException:
         shutil.rmtree(tmp, ignore_errors=True)
         raise
