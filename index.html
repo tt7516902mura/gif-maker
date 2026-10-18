@@ -1,0 +1,65 @@
+<!doctype html><html lang="ja"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>GIFメーカー</title>
+<style>
+:root{--bg:#eef1f4;--ink:#14202b;--card:#fff;--line:#c9d1d9;--ac:#0b6e8a;color-scheme:light dark}
+@media(prefers-color-scheme:dark){:root{--bg:#10171d;--ink:#e6edf3;--card:#18212a;--line:#2f3b47;--ac:#4cb5d3}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.7 system-ui,"Hiragino Sans","Yu Gothic UI",sans-serif}
+main{max-width:620px;margin:auto;padding:20px 16px 64px}
+h1{font-size:24px;margin:8px 0 16px}
+.tabs{display:flex;border-bottom:2px solid var(--line)}
+.tabs button{flex:1;padding:10px;background:none;border:0;border-bottom:3px solid transparent;margin-bottom:-2px;color:inherit;font:inherit;cursor:pointer}
+.tabs .on{border-color:var(--ac);color:var(--ac);font-weight:700}
+section{display:none;padding-top:8px}section.on{display:block}
+label{display:block;margin:14px 0 4px;font-size:14px}
+input:not([type=checkbox]),select{width:100%;padding:10px;border:1px solid var(--line);border-radius:6px;background:var(--card);color:inherit;font:inherit}
+.row{display:flex;gap:10px}.row>div{flex:1}
+.shapes{display:flex;gap:8px;align-items:flex-end}
+.shapes button{flex:1;display:flex;flex-direction:column;align-items:center;gap:6px;padding:8px 4px;background:var(--card);border:1px solid var(--line);border-radius:6px;color:inherit;font:inherit;font-size:13px;cursor:pointer}
+.shapes i{display:block;height:34px;border:2px solid currentColor;opacity:.55}
+.shapes .on{border-color:var(--ac);color:var(--ac)}.shapes .on i{opacity:1;background:color-mix(in srgb,var(--ac) 18%,transparent)}
+.go{width:100%;margin-top:18px;padding:14px;border:0;border-radius:6px;background:var(--ac);color:var(--bg);font:inherit;font-weight:700;cursor:pointer}
+.go:disabled{opacity:.5}
+.out img{max-width:100%;border:1px solid var(--line)}
+.err{color:#c0392b}
+button:focus-visible,input:focus-visible,select:focus-visible{outline:3px solid var(--ac);outline-offset:2px}
+</style>
+<main><h1>GIFメーカー</h1><div class=tabs></div></main>
+<script>
+const SH=[["rect","長方形","16/9"],["square","正方形","1/1"],["tall","縦長","9/16"],["classic","4:3","4/3"],["original","元の比率","3/2"],["custom","自由","1/1"]];
+const KINDS={
+video:{name:"動画",accept:"video/*",w:720,extra:`<div class=row><div><label>開始(秒)</label><input data-p=start type=number min=0 value=0></div><div><label>長さ(秒、0で最後まで)</label><input data-p=length type=number min=0 value=0></div><div><label>コマ数/秒</label><input data-p=fps type=number min=1 max=30 value=12></div></div>`},
+images:{name:"写真",accept:"image/*",multi:1,w:800,extra:`<label>1枚の表示時間(秒)</label><input data-p=seconds type=number min=0.1 step=0.1 value=2>`},
+pdf:{name:"PDF",accept:"application/pdf",w:600,extra:`<div class=row><div><label>ページ(例 1-3,5。空で全部)</label><input data-p=pages></div><div><label>1ページの表示時間(秒)</label><input data-p=seconds type=number min=0.1 step=0.1 value=2></div></div>`}};
+const tabs=document.querySelector(".tabs"),main=document.querySelector("main");
+for(const [k,c] of Object.entries(KINDS)){
+const b=document.createElement("button");b.textContent=c.name;b.dataset.k=k;b.onclick=()=>show(k);tabs.append(b);
+const s=document.createElement("section");s.dataset.k=k;
+s.innerHTML=`<label>${c.name}ファイル${c.multi?"(複数可、選んだ順)":""}</label><input name=files type=file accept="${c.accept}" ${c.multi?"multiple":""}>${c.extra}
+<label>大きさ(形)</label><div class=shapes>${SH.map(([v,t,a],i)=>`<button type=button data-v=${v} class="${i?"":"on"}"><i style="aspect-ratio:${a}"></i>${t}</button>`).join("")}</div><input type=hidden data-p=preset value=rect>
+<div class=row><div><label>幅(px)</label><input data-p=width type=number min=16 max=1920 value=${c.w}></div><div class=h hidden><label>高さ(px)</label><input data-p=height type=number min=16 max=1920 value=${c.w}></div></div>
+<label>形に合わない部分</label><select data-p=fit_mode><option value=contain>全体を収める(余白は白)<option value=crop>切り抜いて埋める</select>
+<label><input type=checkbox data-p=loop checked> くり返し再生</label>
+<button class=go>GIFにする</button><p class=st></p><div class=out></div>`;
+s.onclick=e=>{const t=e.target.closest(".shapes button");if(!t)return;
+s.querySelectorAll(".shapes button").forEach(x=>x.classList.toggle("on",x==t));
+s.querySelector("[data-p=preset]").value=t.dataset.v;s.querySelector(".h").hidden=t.dataset.v!="custom"};
+s.querySelector(".go").onclick=()=>go(k,s);main.append(s)}
+function show(k){document.querySelectorAll("[data-k]").forEach(e=>e.classList.toggle("on",e.dataset.k==k))}
+show("video");
+function go(k,s){
+const f=s.querySelector("[name=files]").files,st=s.querySelector(".st"),out=s.querySelector(".out"),btn=s.querySelector(".go");
+if(!f.length){st.className="st err";st.textContent="ファイルを選んでください";return}
+const fd=new FormData();fd.append("kind",k);[...f].forEach(x=>fd.append("files",x));
+s.querySelectorAll("[data-p]").forEach(e=>fd.append(e.dataset.p,e.type=="checkbox"?+e.checked:e.value));
+const x=new XMLHttpRequest();x.open("POST","/api/convert");x.responseType="blob";
+btn.disabled=true;st.className="st";out.innerHTML="";
+x.upload.onprogress=e=>st.textContent=`アップロード中 ${Math.round(e.loaded/e.total*100)}%`;
+x.upload.onload=()=>st.textContent="変換中…(長い動画は数分かかります)";
+x.onerror=()=>{btn.disabled=false;st.className="st err";st.textContent="通信に失敗しました"};
+x.onload=async()=>{btn.disabled=false;
+if(x.status==200){const u=URL.createObjectURL(x.response);
+st.textContent=`完了: ${x.getResponseHeader("X-Size")} px / ${(x.response.size/1048576).toFixed(1)} MB`;
+out.innerHTML=`<img src="${u}"><p><a href="${u}" download="output.gif">GIFを保存</a></p>`}
+else{let m="変換に失敗しました";try{m=JSON.parse(await x.response.text()).detail}catch{}st.className="st err";st.textContent=m}};
+x.send(fd)}
+</script>
