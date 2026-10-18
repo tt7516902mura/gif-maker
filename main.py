@@ -18,7 +18,7 @@ app = FastAPI()
 async def guard(req, call_next):
     if int(req.headers.get("content-length") or 0) > MAX_MB * 1024 * 1024:
         return Response("ファイルが大きすぎます", 413)
-    if PW:
+    if PW and req.url.path != "/healthz":
         h = req.headers.get("authorization", "")
         try:
             ok = h[:6].lower() == "basic " and secrets.compare_digest(
@@ -28,6 +28,11 @@ async def guard(req, call_next):
         if not ok:
             return Response("認証が必要です", 401, headers={"WWW-Authenticate": 'Basic realm="gif"'})
     return await call_next(req)
+
+
+@app.api_route("/healthz", methods=["GET", "HEAD"])
+def healthz():
+    return Response("ok")
 
 
 @app.get("/", response_class=HTMLResponse)
